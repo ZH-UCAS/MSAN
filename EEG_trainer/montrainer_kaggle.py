@@ -1,0 +1,340 @@
+
+import time
+
+from matplotlib import pyplot as plt
+from torch.autograd import Variable
+from torch import optim
+import torch
+import shutil
+import copy
+from pytorch_metric_learning import distances, losses, miners, reducers, testers
+from pytorch_metric_learning.utils.accuracy_calculator import AccuracyCalculator
+
+
+class Trainer:
+    def __init__(self, model, loss1, loss2, source_train_loader, target_test_loader, args):
+        self.model = model
+        self.args = args
+        self.args.start_epoch = 0
+        self.source_train_loader = source_train_loader
+        self.target_test_loader = target_test_loader
+
+        # Loss function and Optimizer
+        self.loss1 = loss1  # MMD loss
+        self.loss2 = loss2
+        self.optimizer = self.get_optimizer(args)  # Adam
+        # self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, 50, gamma=0.5, last_epoch=-1)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=10, verbose=True)
+        self.best_model_params = copy.deepcopy(model.state_dict())
+        self.best_acc = 0.0
+        self.best_loss = 1000000
+        self.best_optimizer_params = copy.deepcopy(self.optimizer.state_dict())
+
+        # Define triplet loss utility functions
+        self.distance = distances.CosineSimilarity()
+        # self.distance = distances.LpDistance
+        self.reducer = reducers.ThresholdReducer(low=0)
+        self.mining_func = miners.TripletMarginMiner(margin=0.45, distance=self.distance, type_of_triplets="all")
+        self.tripletloss = losses.TripletMarginLoss(margin=0.45, distance=self.distance, reducer=self.reducer)
+
+        # early stop
+        self.max_train_acc = 0
+        self.min_train_loss = 1000000
+        self.early_stop_timer = 0
+
+    def train(self):
+        '''
+        function of training
+        '''
+        train_acc_list = []
+        train_loss_list = []
+        for epoch in range(self.args.start_epoch, self.args.start_epoch + self.args.num_epochs):
+            start_time = time.time()
+            train_loss = 0.0
+            train_acc = 0.0
+            train_triplets_loss = 0.0
+            num_triplets = 0
+
+            for batch_idx, (data, target) in enumerate(self.source_train_loader):
+                # TODO
+                if data.shape[0] == 1:
+                    print("batch size = 1")
+                    print(data.shape)
+                    continue
+                self.model.train()
+                if self.args.cuda:
+                    data = data.cuda()
+                    target = target.cuda()
+                data, target = Variable(data), Variable(target)
+                self.optimizer.zero_grad()
+
+                # predict
+                if self.args.model_name.startswith("MONST"):
+                    ori, output, embeddings = self.model(data)
+                else:
+                    print("mode name incorrect : {}".format(self.args.model_name))
+                    exit()
+
+                labels = target.squeeze()
+                indices_tuple = self.mining_func(embeddings, labels)
+                tlloss = self.tripletloss(embeddings, labels, indices_tuple)
+                num_triplets += self.mining_func.num_triplets
+
+                loss1 = self.loss1(ori, target)
+                loss2 = self.loss2(output, target)
+                loss = loss1 + 3 * loss2 + 9 * tlloss
+
+                loss.backward()
+
+                # 打印梯度异常的参数
+                for name, param in self.model.named_parameters():
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        print('梯度异常:', name)
+                        print('梯度值:', torch.abs(param.grad).max())
+                        print('梯度:', param.grad)
+                        print('参数:', param)
+                        print('-----------------------------------')
+
+                self.optimizer.step()
+                train_loss += loss.data.item()
+                train_triplets_loss += tlloss.data.item()
+
+                index = output.cpu().data.numpy().argmax(axis=1)
+                label = target.cpu().data.numpy()[:, 0]
+                train_acc += sum(index == label)
+
+            train_acc /= len(self.source_train_loader.dataset)
+            train_loss /= len(self.source_train_loader.dataset)
+            train_triplets_loss /= len(self.source_train_loader.dataset)
+            train_acc_list.append(train_acc)
+            train_loss_list.append(train_loss)
+
+            # early stop
+            if train_loss < self.best_loss:
+                self.best_loss = train_loss
+            if train_acc > self.best_acc:
+                self.best_acc = train_acc
+            if (train_acc > self.max_train_acc) & (train_acc < 0.98):
+                self.max_train_acc = train_acc
+                self.early_stop_timer = 0
+            elif (train_acc > 0.98) & (train_loss < 0.0035) & ((train_loss - self.best_loss) < 0.0015) & ((train_acc - self.best_acc) < 0.01) & (
+                    train_triplets_loss < 0.00025):
+                self.early_stop_timer += 1
+                print("early-stop count : {}".format(self.early_stop_timer))
+                print("best : acc {:.4} | loss {:.4}".format(self.best_acc, self.best_loss))
+            elif train_loss > 0.2:
+                self.early_stop_timer = 0
+            if (self.early_stop_timer >= self.args.early_stop_patience) & ((train_loss - self.best_loss) < 0.002):
+                print("\nearly stop\n")
+                print("epoch : {}\ntrain : acc {:.4} | loss {:.4} | train_triplets {} | train_triplets_loss {:.4} | early-stop count {}".format(epoch,
+                                                                                                                                                train_acc,
+                                                                                                                                                train_loss,
+                                                                                                                                                num_triplets,
+                                                                                                                                                train_triplets_loss,
+                                                                                                                                                self.early_stop_timer))
+                break
+            if (train_acc > 0.9975) & (train_loss < 0.002) & (self.early_stop_timer >= 8) & (train_triplets_loss < 0.0001) & (
+                    (train_loss - self.best_loss) < 0.0015) & ((train_acc - self.best_acc) < 0.01):
+                print("\nearly stop 2\n")
+                print("epoch : {}\ntrain : acc {:.4} | loss {:.4} | train_triplets {} | train_triplets_loss {:.4} | early-stop count {}".format(epoch,
+                                                                                                                                                train_acc,
+                                                                                                                                                train_loss,
+                                                                                                                                                num_triplets,
+                                                                                                                                                train_triplets_loss,
+                                                                                                                                                self.early_stop_timer))
+                break
+            if (train_acc > 0.998) & (train_loss < 0.003) & (self.early_stop_timer >= 5) & (train_triplets_loss < 0.0001) & (
+                    (train_loss - self.best_loss) < 0.0001) & ((train_acc - self.best_acc) < 0.01) & (train_triplets_loss < 0.0001) & (num_triplets < 50000):
+                print("\nearly stop X\n")
+                print("epoch : {}\ntrain : acc {:.4} | loss {:.4} | train_triplets {} | train_triplets_loss {:.4} | early-stop count {}".format(epoch,
+                                                                                                                                                train_acc,
+                                                                                                                                                train_loss,
+                                                                                                                                                num_triplets,
+                                                                                                                                                train_triplets_loss,
+                                                                                                                                                self.early_stop_timer))
+                break
+
+            #################### noise ####################
+            if (train_acc > 0.98) & (train_loss < 0.035) & ((train_loss - self.best_loss) < 0.002) & ((train_acc - self.best_acc) < 0.01) & (
+                    train_triplets_loss < 0.0035):
+                self.early_stop_timer += 1
+                print("early-stop count : {}".format(self.early_stop_timer))
+                print("best : acc {:.4} | loss {:.4}".format(self.best_acc, self.best_loss))
+
+            if (train_acc > 0.99) & (train_loss < 0.03) & (self.early_stop_timer >= 10) & (train_triplets_loss < 0.0025) & (
+                    (train_loss - self.best_loss) < 0.0015) & ((train_acc - self.best_acc) < 0.01) & (num_triplets < 3000000):
+                print("\nearly stop 2\n")
+                print("epoch : {}\ntrain : acc {:.4} | loss {:.4} | train_triplets {} | train_triplets_loss {:.4} | early-stop count {}".format(epoch,
+                                                                                                                                                train_acc,
+                                                                                                                                                train_loss,
+                                                                                                                                                num_triplets,
+                                                                                                                                                train_triplets_loss,
+                                                                                                                                                self.early_stop_timer))
+                break
+            if (train_acc > 0.99) & (train_loss < 0.02) & (self.early_stop_timer >= 5) & (train_triplets_loss < 0.002) & (
+                    (train_loss - self.best_loss) < 0.001) & ((train_acc - self.best_acc) < 0.01) & (num_triplets < 2000000):
+                print("\nearly stop X\n")
+                print("epoch : {}\ntrain : acc {:.4} | loss {:.4} | train_triplets {} | train_triplets_loss {:.4} | early-stop count {}".format(epoch,
+                                                                                                                                                train_acc,
+                                                                                                                                                train_loss,
+                                                                                                                                                num_triplets,
+                                                                                                                                                train_triplets_loss,
+                                                                                                                                                self.early_stop_timer))
+                break
+            #################### noise ####################
+
+            self.scheduler.step(train_loss)
+
+            # print the current learning rate
+            print(f"Current learning rate: {self.optimizer.param_groups[0]['lr']}")
+
+            if train_acc > self.best_acc:
+                self.best_acc = train_acc
+            if train_loss < self.best_loss:
+                self.best_loss = train_loss
+                # self.best_model_wts = copy.deepcopy(self.model.state_dict())
+
+            # print results
+            print("epoch : {}\ntrain : acc {:.4} | loss {:.4} | train_triplets {} | train_triplets_loss {:.4} | early-stop count {}".format(epoch, train_acc,
+                                                                                                                                            train_loss,
+                                                                                                                                            num_triplets,
+                                                                                                                                            train_triplets_loss,
+                                                                                                                                            self.early_stop_timer))
+            # 记录每个 epoch 的结束时间
+            end_time = time.time()
+            # 计算每个 epoch 的时间差
+            epoch_time = end_time - start_time
+            # 打印每个 epoch 的时间信息
+            print("Epoch {}: {:.2f} seconds".format(epoch + 1, epoch_time))
+            # test model
+            if self.args.TestWhenTraining == 1:
+                test_acc, test_loss, index_list, target_list = self.test()
+                TP, FP, TN, FN = 0, 0, 0, 0
+                for i in range(len(index_list)):
+                    for j in range(len(index_list[i])):
+                        if index_list[i][j] == 1 and target_list[i][j] == 1:
+                            TP += 1
+                        elif index_list[i][j] == 0 and target_list[i][j] == 1:
+                            FN += 1
+                        elif index_list[i][j] == 0 and target_list[i][j] == 0:
+                            TN += 1
+                        else:
+                            FP += 1
+                print("test : TP {} | FN {} | TN {} | FP {} | sen {:.4%} | spe {:.4%} | acc {:.4%}\n".format(TP, FN, TN, FP, TP / (TP + FN), TN / (TN + FP),
+                                                                                                             (TP + TN) / (TP + FN + TN + FP)))
+
+        return self.model, train_acc_list, train_loss_list
+
+    def test(self):
+        '''
+        function of testing
+        '''
+        print("self.test()")
+        target_list = []
+        index_list = []
+        self.model.eval()
+        test_loss = 0.0
+        test_acc = 0.0
+        with torch.no_grad():
+            for i, (data, target) in enumerate(self.target_test_loader):
+                if self.args.cuda:
+                    data = data.cuda()
+                    target = target.cuda()
+
+                # model predict
+                if self.args.model_name.startswith("TA_STS_ConvNet"):
+                    output, feature = self.model(data)
+                elif self.args.model_name.startswith("STAN"):
+                    output = self.model(data)
+                elif self.args.model_name.startswith("MONST"):
+                    ori, output, _ = self.model(data)
+                else:
+                    print("mode name incorrect : {}".format(self.args.model_name))
+                    exit()
+                loss1 = self.loss1(ori, target)
+                loss2 = self.loss2(output, target)
+                loss = loss1 + loss2
+                test_loss += loss.data.item()
+                index = output.cpu().data.numpy().argmax(axis=1)
+                label = target.cpu().data.numpy()[:, 0]
+                test_acc += sum(index == label)
+
+                target_list.append(target)
+                index_list.append(index)
+
+        test_acc /= len(self.target_test_loader.dataset)
+        test_loss /= len(self.target_test_loader.dataset)
+        self.model.train()
+        return test_acc, test_loss, index_list, target_list  # index.reshape(5, 20)
+
+    def test_on_trainings_set(self):
+        print('testing...')
+        self.model.eval()
+        test_loss = 0
+        for i, (data, _) in enumerate(self.source_train_loader):
+            if self.args.cuda:
+                data = data.cuda()
+            data = Variable(data, volatile=True)
+            recon_batch, mu, logvar, z = self.model(data)
+            test_loss += self.loss(recon_batch, data, mu, logvar).data[0]
+            '''
+            if i % 50 == 0:
+                n = min(data.size(0), 8)
+                comparison = torch.cat([data[:n],
+                                        recon_batch.view(-1, 3, 32, 32)[:n]])
+                self.summary_writer.add_image('training_set/image', comparison, i)
+            '''
+        test_loss /= len(self.target_test_loader.dataset)
+        print('====> Test on training set loss: {:.4f}'.format(test_loss))
+        self.model.train()
+
+    def get_optimizer(self, args):
+        if self.args.model_name.startswith("TA_STS_ConvNet"):
+            return optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=self.args.learning_rate,
+                              weight_decay=self.args.weight_decay)
+        elif self.args.model_name.startswith("STAN"):
+            return optim.AdamW(filter(lambda p: p.requires_grad, self.model.parameters()), lr=self.args.learning_rate, weight_decay=5E-2)
+        elif self.args.model_name.startswith("MONST"):
+            return optim.AdamW(filter(lambda p: p.requires_grad, self.model.parameters()), lr=self.args.learning_rate, weight_decay=5E-2)
+
+        # return optim.SGD(filter(lambda p: p.requires_grad, self.model.parameters()), lr = self.args.learning_rate)
+
+    def adjust_learning_rate(self, epoch):
+        """Sets the learning rate to the initial LR multiplied by 0.98 every epoch"""
+        learning_rate = self.args.learning_rate * (self.args.learning_rate_decay ** epoch)
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = learning_rate
+            # param_group['lr'] = param_group['lr']*0.2
+
+    def adjust_learning_rate_step(self):
+        """Sets the learning rate to the initial LR multiplied by 0.98 every epoch"""
+        # learning_rate = self.args.learning_rate * (self.args.learning_rate_decay ** epoch)
+        for param_group in self.optimizer.param_groups:
+            # param_group['lr'] = learning_rate
+            param_group['lr'] = param_group['lr'] * 0.99
+
+    def save_checkpoint(self, epoch, state, is_best=False, filename='checkpoint{}.pth'):
+        '''
+        a function to save checkpoint of the training
+        :param state: {'epoch': cur_epoch + 1, 'state_dict': self.model.state_dict(),
+                            'optimizer': self.optimizer.state_dict()}
+        :param is_best: boolean to save the checkpoint aside if it has the best score so far
+        :param filename: the name of the saved file
+        '''
+        torch.save(state, self.args.checkpoint_dir + filename.format(epoch))
+        if is_best:
+            shutil.copyfile(self.args.checkpoint_dir + filename,
+                            self.args.checkpoint_dir + 'model_best.pth.tar')
+
+    def load_checkpoint(self, filename):
+        filename = self.args.checkpoint_dir + filename
+        try:
+            print("Loading checkpoint '{}'".format(filename))
+            checkpoint = torch.load(filename)
+            self.args.start_epoch = checkpoint['epoch']
+            self.model.load_state_dict(checkpoint['state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+            print("Checkpoint loaded successfully from '{}' at (epoch {})\n"
+                  .format(self.args.checkpoint_dir, checkpoint['epoch']))
+        except:
+            print("No checkpoint exists from '{}'. Skipping...\n".format(self.args.checkpoint_dir))
