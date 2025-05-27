@@ -1,29 +1,66 @@
-# 1. 数据准备
-请从以下地址下载 CHB-MIT 数据集：
-http://archive.physionet.org/physiobank/database/chbmit/
 
-# 2. 数据预处理
 
-## - 如果仅需处理单个患者的数据，执行：
-make preprocess
+# CHB-MIT EEG Dataset: Preprocessing, Training, and Evaluation
 
-## - 若需处理所有患者的数据，执行：
-make preprocess_chb
+This repository provides a complete pipeline for preprocessing, training, and evaluating models on the [CHB-MIT Scalp EEG Database](http://archive.physionet.org/physiobank/database/chbmit/).
 
-# 3. 模型训练
+## ⚙️ 1. Data Preparation
 
-## - 针对某一位患者进行训练：
-make train
+Please download the CHB-MIT EEG dataset from:
 
-## - 若训练全部患者数据，执行：
-make train_chb
+**[Download Link](http://archive.physionet.org/physiobank/database/chbmit/)**
 
-# 4. 模型评估
+## 🧹 2. Data Preprocessing
 
-## - 评估单个患者模型：
-make eval
+* **To preprocess data for a single patient**, run:
 
-## - 评估所有患者模型：
-make eval_chb
+  ```bash
+  make preprocess
+  ```
 
-# 如有任何遗漏的依赖项或其他配置问题，请及时联系我。
+* **To preprocess data for all patients**, run:
+
+  ```bash
+  make preprocess_chb
+  ```
+
+## 🧠 3. Model Training
+
+* **To train a model on a single patient's data**, run:
+
+  ```bash
+  make train
+  ```
+
+* **To train on all patients' data**, run:
+
+  ```bash
+  make train_chb
+  ```
+
+## 📊 4. Model Evaluation
+
+* **To evaluate a model trained on a single patient**, run:
+
+  ```bash
+  make eval
+  ```
+
+* **To evaluate models trained on all patients**, run:
+
+  ```bash
+  make eval_chb
+  ```
+
+## 📚 Citation & Acknowledgment
+
+This project utilizes techniques and concepts described in the following publication. Please cite this work if you use the associated codebase or methodologies:
+
+> Q. Dong, H. Zhang, J. Xiao, and J. Sun, "Multi-Scale Spatio-Temporal Attention Network for Epileptic Seizure Prediction," *IEEE Journal of Biomedical and Health Informatics*, 2025. doi: [10.1109/JBHI.2025.3545265](https://doi.org/10.1109/JBHI.2025.3545265)
+
+**Keywords**: Feature extraction; Electroencephalography; Transformers; Long short-term memory; Data mining; Brain modeling; Training; Spectrogram; Convolution; Computer vision; EEG spectrogram; Epilepsy; Seizure prediction; Multi-scale spatio-temporal attention; Vision Transformer.
+
+## 🔧 Note
+
+If you encounter any missing dependencies or configuration issues, please don’t hesitate to contact me.
+
