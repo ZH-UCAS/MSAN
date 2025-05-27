@@ -1,6 +1,6 @@
 
 
-# CHB-MIT EEG Dataset: Preprocessing, Training, and Evaluation
+# MSAN
 
 This repository provides a complete pipeline for preprocessing, training, and evaluating models on the [CHB-MIT Scalp EEG Database](http://archive.physionet.org/physiobank/database/chbmit/).
 
