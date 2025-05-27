@@ -58,7 +58,7 @@ This project utilizes techniques and concepts described in the following publica
 
 > Q. Dong, H. Zhang, J. Xiao, and J. Sun, "Multi-Scale Spatio-Temporal Attention Network for Epileptic Seizure Prediction," *IEEE Journal of Biomedical and Health Informatics*, 2025. doi: [10.1109/JBHI.2025.3545265](https://doi.org/10.1109/JBHI.2025.3545265)
 
-**Keywords**: Feature extraction; Electroencephalography; Transformers; Long short-term memory; Data mining; Brain modeling; Training; Spectrogram; Convolution; Computer vision; EEG spectrogram; Epilepsy; Seizure prediction; Multi-scale spatio-temporal attention; Vision Transformer.
+**Keywords**: Feature extraction; Electroencephalography; Epilepsy; Seizure prediction; Multi-scale spatio-temporal attention.
 
 ## 🔧 Note
 
